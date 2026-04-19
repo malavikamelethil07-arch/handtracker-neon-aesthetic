@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cyberpunk Hand Tracker</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+  }
+
+  #container {
+    position: relative;
+    width: 1280px;
+    max-width: 100vw;
+  }
+
+  #video {
+    display: none;
+  }
+
+  #canvas {
+    display: block;
+    width: 100%;
+    background: #000;
+    border: 1px solid #0ff3;
+    box-shadow: 0 0 40px #0ff2, 0 0 80px #0ff1;
+  }
+
+  #hud {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none;
+  }
+
+  #fps {
+    position: absolute;
+    top: 14px; left: 18px;
+    color: #0ff;
+    font-size: 13px;
+    letter-spacing: 0.12em;
+    text-shadow: 0 0 8px #0ff;
+  }
+
+  #status {
+    position: absolute;
+    bottom: 14px; left: 18px;
+    color: #0ff5;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+
+  #dist-label {
+    position: absolute;
+    top: 14px; right: 18px;
+    color: #ffd700;
+    font-size: 13px;
+    letter-spacing: 0.1em;
+    text-shadow: 0 0 8px #ffd700;
+    display: none;
+  }
+
+  #pinch-label {
+    position: absolute;
+    top: 40px; left: 18px;
+    color: #ff1493;
+    font-size: 13px;
+    letter-spacing: 0.14em;
+    text-shadow: 0 0 10px #ff1493;
+    display: none;
+  }
+
+  #loader {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    z-index: 100;
+  }
+
+  #loader-title {
+    color: #0ff;
+    font-size: 22px;
+    letter-spacing: 0.25em;
+    text-shadow: 0 0 20px #0ff;
+    text-transform: uppercase;
+  }
+
+  #loader-sub {
+    color: #0ff7;
+    font-size: 12px;
+    letter-spacing: 0.2em;
+  }
+
+  .loader-bar {
+    width: 280px;
+    height: 2px;
+    background: #0ff2;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .loader-bar::after {
+    content: '';
+    position: absolute;
+    left: -60%;
+    top: 0;
+    width: 60%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, #0ff, transparent);
+    animation: scan 1.4s linear infinite;
+  }
+
+  @keyframes scan { to { left: 140%; } }
+
+  #loader-error {
+    color: #ff4444;
+    font-size: 13px;
+    letter-spacing: 0.1em;
+    display: none;
+    text-align: center;
+    max-width: 360px;
+    line-height: 1.7;
+  }
+</style>
+</head>
+<body>
+
+<div id="loader">
+  <div id="loader-title">⬡ Cyberpunk Hand Tracker</div>
+  <div id="loader-sub">Initialising neural vision systems...</div>
+  <div class="loader-bar"></div>
+  <div id="loader-error"></div>
+</div>
+
+<div id="container">
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="canvas"></canvas>
+
+  <div id="hud">
+    <div id="fps">FPS: --</div>
+    <div id="pinch-label">◈ PINCH DETECTED</div>
+    <div id="dist-label">DIST: --</div>
+    <div id="status">Cyberpunk Hand Tracker &nbsp;|&nbsp; MediaPipe Hands</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<script>
+const CYAN         = '#00ffff';
+const PINK         = '#ff1493';
+const WHITE        = '#ffffff';
+const GOLD         = '#ffd700';
+const GLOW_CYAN    = 'rgba(0,255,255,0.35)';
+const GLOW_PINK    = 'rgba(255,20,147,0.35)';
+const GLOW_GOLD    = 'rgba(255,215,0,0.3)';
+const PINCH_THRESH = 40;
+
+const CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [0,9],[9,10],[10,11],[11,12],
+  [0,13],[13,14],[14,15],[15,16],
+  [0,17],[17,18],[18,19],[19,20],
+  [5,9],[9,13],[13,17]
+];
+
+const video     = document.getElementById('video');
+const canvas    = document.getElementById('canvas');
+const ctx       = canvas.getContext('2d');
+const fpsEl     = document.getElementById('fps');
+const distEl    = document.getElementById('dist-label');
+const pinchEl   = document.getElementById('pinch-label');
+const loader    = document.getElementById('loader');
+const loaderSub = document.getElementById('loader-sub');
+const loaderErr = document.getElementById('loader-error');
+
+let lastTime = performance.now();
+
+function updateFPS() {
+  const now = performance.now();
+  const fps = Math.round(1000 / Math.max(now - lastTime, 1));
+  lastTime = now;
+  fpsEl.textContent = `FPS: ${fps}`;
+}
+
+function glowLine(x1, y1, x2, y2, color, glowColor) {
+  ctx.save();
+  ctx.shadowColor = glowColor;
+  ctx.shadowBlur  = 18;
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = 5;
+  ctx.lineCap     = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.strokeStyle = WHITE;
+  ctx.lineWidth   = 1.2;
+  ctx.lineCap     = 'round';
+  ctx.globalAlpha = 0.85;
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function glowDot(x, y, color, glowColor) {
+  ctx.save();
+  ctx.shadowColor = glowColor;
+  ctx.shadowBlur  = 14;
+  ctx.fillStyle   = color;
+  ctx.beginPath();
+  ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.fillStyle   = WHITE;
+  ctx.globalAlpha = 0.9;
+  ctx.beginPath();
+  ctx.arc(x, y, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function hudText(text, x, y, color = CYAN, glowColor = GLOW_CYAN) {
+  ctx.save();
+  ctx.font        = '13px "Courier New", monospace';
+  ctx.shadowColor = glowColor;
+  ctx.shadowBlur  = 10;
+  ctx.fillStyle   = color;
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+function isPinching(pts) {
+  const dx = pts[4].x - pts[8].x;
+  const dy = pts[4].y - pts[8].y;
+  return Math.hypot(dx, dy) < PINCH_THRESH;
+}
+
+function drawHand(landmarks, pinching) {
+  const W = canvas.width;
+  const H = canvas.height;
+
+  const pts = landmarks.map(lm => ({ x: lm.x * W, y: lm.y * H }));
+  const color     = pinching ? PINK : CYAN;
+  const glowColor = pinching ? GLOW_PINK : GLOW_CYAN;
+
+  for (const [a, b] of CONNECTIONS) {
+    glowLine(pts[a].x, pts[a].y, pts[b].x, pts[b].y, color, glowColor);
+  }
+  for (const pt of pts) {
+    glowDot(pt.x, pt.y, color, glowColor);
+  }
+
+  return pts;
+}
+
+function drawTwoHandDistance(ptsA, ptsB) {
+  const cx = arr => arr.reduce((s, p) => s + p.x, 0) / arr.length;
+  const cy = arr => arr.reduce((s, p) => s + p.y, 0) / arr.length;
+
+  const ax = cx(ptsA), ay = cy(ptsA);
+  const bx = cx(ptsB), by = cy(ptsB);
+  const dist = Math.round(Math.hypot(ax - bx, ay - by));
+
+  ctx.save();
+  ctx.shadowColor = GLOW_GOLD;
+  ctx.shadowBlur  = 16;
+  ctx.strokeStyle = GOLD;
+  ctx.lineWidth   = 1.5;
+  ctx.setLineDash([6, 6]);
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(bx, by);
+  ctx.stroke();
+  ctx.restore();
+
+  hudText(`DIST: ${dist}px`, (ax + bx) / 2 - 44, (ay + by) / 2 - 10, GOLD, GLOW_GOLD);
+
+  distEl.style.display = 'block';
+  distEl.textContent   = `PALM DISTANCE: ${dist}px`;
+}
+
+function onResults(results) {
+  updateFPS();
+
+  canvas.width  = results.image.width  || video.videoWidth  || 1280;
+  canvas.height = results.image.height || video.videoHeight || 720;
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  let anyPinch = false;
+  const allPts = [];
+
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+    for (const landmarks of results.multiHandLandmarks) {
+      const pts      = landmarks.map(lm => ({ x: lm.x * canvas.width, y: lm.y * canvas.height }));
+      const pinching = isPinching(pts);
+      if (pinching) anyPinch = true;
+      allPts.push(drawHand(landmarks, pinching));
+    }
+
+    if (allPts.length === 2) {
+      drawTwoHandDistance(allPts[0], allPts[1]);
+    } else {
+      distEl.style.display = 'none';
+    }
+  } else {
+    distEl.style.display = 'none';
+  }
+
+  pinchEl.style.display = anyPinch ? 'block' : 'none';
+
+  // Scanline overlay
+  ctx.fillStyle = 'rgba(0,255,255,0.012)';
+  for (let y = 0; y < canvas.height; y += 4) {
+    ctx.fillRect(0, y, canvas.width, 1);
+  }
+}
+
+async function init() {
+  try {
+    loaderSub.textContent = 'Requesting webcam access...';
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720, facingMode: 'user' }
+    });
+    video.srcObject = stream;
+    await new Promise(r => video.onloadedmetadata = r);
+    video.play();
+
+    loaderSub.textContent = 'Loading MediaPipe Hands model...';
+    const hands = new Hands({
+      locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands:            2,
+      modelComplexity:        1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence:  0.6,
+    });
+
+    hands.onResults(onResults);
+
+    loaderSub.textContent = 'Warming up model...';
+    const camera = new Camera(video, {
+      onFrame: async () => { await hands.send({ image: video }); },
+      width: 1280, height: 720,
+    });
+
+    await camera.start();
+
+    loader.style.transition = 'opacity 0.6s';
+    loader.style.opacity    = '0';
+    setTimeout(() => loader.style.display = 'none', 650);
+
+  } catch (err) {
+    loaderSub.style.display = 'none';
+    loaderErr.style.display = 'block';
+    loaderErr.textContent = err.name === 'NotAllowedError'
+      ? 'Webcam access denied. Allow camera permission and refresh.'
+      : err.name === 'NotFoundError'
+      ? 'No webcam found. Connect a camera and refresh.'
+      : `Error: ${err.message}`;
+  }
+}
+
+init();
+</script>
+</body>
+</html>
